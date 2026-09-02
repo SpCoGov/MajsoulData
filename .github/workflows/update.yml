@@ -90,9 +90,26 @@ jobs:
       - name: Copy and rename majsoul_protocol.desc
         run: cp /tmp/majsoul_protocol.desc ./liqi.desc
 
-      - name: Run get_max_data.py
-        id: get_max_data
-        run: python get_max_data.py
+      - name: Generate liqi.proto
+        run: python desc_to_proto.py liqi.desc liqi.proto --package lq
+
+      - name: Get release version
+        id: release_version
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          docs_version = json.loads(
+              Path("data/client/docs_version/version.json").read_text()
+          )["version"]
+          product_version = json.loads(Path("data/meta.json").read_text())[
+              "product_version"
+          ]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={docs_version}-{product_version}\n")
+          PY
 
       - name: Get latest release
         id: get_latest_release
@@ -107,16 +124,16 @@ jobs:
         uses: softprops/action-gh-release@v3
         if: |
           steps.get_latest_release.outcome == 'failure' ||
-          steps.get_latest_release.outputs.tag_name != steps.get_max_data.outputs.version
+          steps.get_latest_release.outputs.tag_name != steps.release_version.outputs.version
         with:
-          tag_name: ${{ steps.get_max_data.outputs.version }}
+          tag_name: ${{ steps.release_version.outputs.version }}
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            Release ${{ steps.get_max_data.outputs.version }}
-            Auto-generated max_data.yaml and liqi.desc files.
+            Release ${{ steps.release_version.outputs.version }}
+            Auto-generated liqi.desc and liqi.proto files.
           make_latest: true
           files: |
-            max_data.yaml
             liqi.desc
+            liqi.proto
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
