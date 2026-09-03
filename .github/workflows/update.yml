@@ -49,9 +49,9 @@ jobs:
       - name: Update data
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
-            python main.py
+            python main.py --asset-mode all
           else
-            python main.py --skip-if-current
+            python main.py --asset-mode all --skip-if-current
           fi
 
       - name: Validate generated data
@@ -68,6 +68,12 @@ jobs:
                   json.loads(path.read_text(encoding="utf-8"))
                   count += 1
           print(f"json ok: {count}")
+
+          assets = json.loads(Path("assets/manifest.json").read_text(encoding="utf-8"))
+          assert assets["Texture2D"] > 0
+          assert assets["Sprite"] > 0
+          assert "AudioClip" in assets
+          print(f"unity assets ok: {assets}")
           PY
           files=$(find data/protocol/proto -maxdepth 1 -name '*.proto' -printf '%f\n' | sort)
           protoc --proto_path=data/protocol/proto --descriptor_set_out=/tmp/majsoul_protocol.desc $files
@@ -75,9 +81,10 @@ jobs:
       - name: Commit and push changes
         id: commit_changes
         run: |
+          git lfs install --local
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A data/ raw/
+          git add -A data/ raw/ assets/
           if git diff --staged --quiet; then
             echo "No changes to commit"
             echo "changed=false" >> "$GITHUB_OUTPUT"

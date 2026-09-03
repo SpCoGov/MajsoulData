@@ -35,6 +35,7 @@ from src.protocol import build_protocol_outputs
 DEFAULT_CLIENT_URL = "https://game.maj-soul.com/1/"
 DEFAULT_OUTPUT_DIR = "data"
 DEFAULT_RAW_DIR = "raw"
+DEFAULT_ASSET_DIR = "assets"
 RAW_LUA_SUBDIR = Path("lua")
 TABLES_SUBDIR = "tables"
 LOCALES_SUBDIR = "locales"
@@ -681,10 +682,13 @@ def is_current_client_metadata(
     client_info: dict[str, str | None],
     bundle_profile: str,
     bundle_hash: str,
+    asset_mode: str | None = None,
 ) -> bool:
     if metadata.get("bundle_profile") != bundle_profile:
         return False
     if metadata.get("bundle_hash") != bundle_hash:
+        return False
+    if asset_mode is not None and metadata.get("asset_mode") != asset_mode:
         return False
     product_version = client_info.get("product_version")
     return not product_version or metadata.get("product_version") == product_version
@@ -953,6 +957,102 @@ def extract_text_assets(bundle_bytes: bytes) -> dict[str, bytes]:
     return assets
 
 
+def safe_file_component(value: str) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value).strip(" .")
+    return (cleaned or "unnamed")[:120]
+
+
+def audio_sample_extension(sample_name: str) -> str:
+    extension = Path(sample_name).suffix.lower()
+    return extension if extension in {".m4a", ".ogg", ".wav"} else ".wav"
+
+
+def unity_asset_output_path(
+    asset_dir: Path,
+    type_name: str,
+    bundle_index: int,
+    path_id: int,
+    name: str,
+    extension: str,
+) -> Path:
+    filename = f"{path_id}_{safe_file_component(name)}{extension}"
+    return safe_output_path(asset_dir, f"{type_name}/{bundle_index:04d}/{filename}")
+
+
+def export_unity_objects(
+    bundle_bytes: bytes, asset_dir: Path, bundle_index: int
+) -> dict[str, int]:
+    counts = {"Texture2D": 0, "Sprite": 0, "AudioClip": 0, "failed": 0}
+    env = UnityPy.load(bundle_bytes)
+    for obj in env.objects:
+        type_name = obj.type.name
+        if type_name not in counts or type_name == "failed":
+            continue
+        try:
+            value = obj.read()
+            name = getattr(value, "m_Name", "") or type_name
+            if type_name in {"Texture2D", "Sprite"}:
+                target = unity_asset_output_path(
+                    asset_dir, type_name, bundle_index, obj.path_id, name, ".png"
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                value.image.save(target, "PNG")
+                counts[type_name] += 1
+                continue
+
+            samples = value.samples
+            if not samples:
+                raise ValueError("AudioClip contains no samples")
+            if len(samples) == 1:
+                sample_name, sample_data = next(iter(samples.items()))
+                target = unity_asset_output_path(
+                    asset_dir,
+                    type_name,
+                    bundle_index,
+                    obj.path_id,
+                    name,
+                    audio_sample_extension(sample_name),
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(sample_data)
+                counts[type_name] += 1
+            else:
+                clip_dir = unity_asset_output_path(
+                    asset_dir, type_name, bundle_index, obj.path_id, name, ""
+                )
+                clip_dir.mkdir(parents=True, exist_ok=True)
+                for index, (sample_name, sample_data) in enumerate(samples.items()):
+                    sample = safe_file_component(Path(sample_name).stem)
+                    extension = audio_sample_extension(sample_name)
+                    (clip_dir / f"{index:03d}_{sample}{extension}").write_bytes(sample_data)
+                    counts[type_name] += 1
+        except Exception as exc:
+            counts["failed"] += 1
+            print(f"  Failed {type_name} path_id={obj.path_id}: {exc}", file=sys.stderr)
+    return counts
+
+
+def extract_unity_assets(
+    session: requests.Session,
+    profile_base_url: str,
+    bundle_infos: list[dict],
+    asset_dir: Path,
+    timeout: int,
+) -> dict[str, int]:
+    totals = {"Texture2D": 0, "Sprite": 0, "AudioClip": 0, "failed": 0}
+    total_bundles = len(bundle_infos)
+    for bundle_index, bundle_info in enumerate(bundle_infos):
+        bundle_name = bundle_info["name"]
+        print(f"[{bundle_index + 1}/{total_bundles}] Exporting {bundle_name}")
+        bundle_bytes = fetch_bytes(
+            session, join_url(profile_base_url, bundle_name), timeout
+        )
+        counts = export_unity_objects(bundle_bytes, asset_dir, bundle_index)
+        for key, count in counts.items():
+            totals[key] += count
+    return totals
+
+
 def write_asset(raw_dir: Path, asset_path: str, data: bytes) -> None:
     if asset_path.startswith("LuaByte/Lua/"):
         target = safe_output_path(raw_dir, raw_lua_asset_path(asset_path))
@@ -1012,6 +1112,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Directory for extracted raw Unity TextAssets.",
     )
     parser.add_argument(
+        "--asset-dir",
+        default=DEFAULT_ASSET_DIR,
+        help="Directory for exported Texture2D, Sprite, and AudioClip assets.",
+    )
+    parser.add_argument(
+        "--asset-mode",
+        choices=("text", "all"),
+        default="text",
+        help="Use 'all' to scan every bundle for Texture2D, Sprite, and AudioClip assets.",
+    )
+    parser.add_argument(
         "--texture-profile",
         action="append",
         dest="texture_profiles",
@@ -1042,6 +1153,7 @@ def run(args: argparse.Namespace) -> int:
     client_url = args.client_url
     output_dir = Path(args.output_dir)
     raw_dir = Path(args.raw_dir)
+    asset_dir = Path(args.asset_dir)
     texture_profiles = tuple(args.texture_profiles or DEFAULT_TEXTURE_PROFILES)
     asset_prefixes = tuple(args.asset_prefixes or DEFAULT_ASSET_PREFIXES)
 
@@ -1076,11 +1188,17 @@ def run(args: argparse.Namespace) -> int:
     print(f"Bundle profile: {profile}")
     print(f"Bundle hash: {bundle_hash}")
 
-    if args.skip_if_current and is_current_client_metadata(
-        load_metadata(output_dir),
-        client_info,
-        profile,
-        bundle_hash,
+    metadata = load_metadata(output_dir)
+    if (
+        args.skip_if_current
+        and is_current_client_metadata(
+            metadata,
+            client_info,
+            profile,
+            bundle_hash,
+            args.asset_mode,
+        )
+        and (args.asset_mode != "all" or (asset_dir / "manifest.json").exists())
     ):
         print("Remote client matches data/meta.json; skipping data update.")
         return 0
@@ -1101,6 +1219,8 @@ def run(args: argparse.Namespace) -> int:
     if not args.keep_existing:
         reset_output_dir(output_dir)
         reset_output_dir(raw_dir)
+        if args.asset_mode == "all":
+            reset_output_dir(asset_dir)
     else:
         output_dir.mkdir(parents=True, exist_ok=True)
         raw_dir.mkdir(parents=True, exist_ok=True)
@@ -1117,6 +1237,29 @@ def run(args: argparse.Namespace) -> int:
     if missing_count:
         print(f"Missing: {missing_count}", file=sys.stderr)
         return 1
+    unity_asset_counts: dict[str, int] = {}
+    if args.asset_mode == "all":
+        unity_asset_counts = extract_unity_assets(
+            session,
+            profile_base_url,
+            bundle_infos,
+            asset_dir.resolve(),
+            args.timeout,
+        )
+        write_json(
+            asset_dir.resolve() / "manifest.json",
+            {
+                "product_version": client_info.get("product_version"),
+                "bundle_profile": profile,
+                "bundle_hash": bundle_hash,
+                "bundles": len(bundle_infos),
+                **unity_asset_counts,
+            },
+        )
+        print(
+            "Exported Unity assets: "
+            + ", ".join(f"{key}={value}" for key, value in unity_asset_counts.items())
+        )
     json_counts = build_json_outputs(
         output_dir.resolve(),
         raw_dir.resolve(),
@@ -1128,6 +1271,7 @@ def run(args: argparse.Namespace) -> int:
             "bundle_profile": profile,
             "bundle_hash": bundle_hash,
             "raw_dir": raw_dir.as_posix(),
+            "asset_mode": args.asset_mode,
         },
     )
     print(
@@ -1158,6 +1302,8 @@ def run(args: argparse.Namespace) -> int:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         meta["protocol"] = protocol_counts
         meta["client_data"] = client_counts
+        if unity_asset_counts:
+            meta["unity_assets"] = unity_asset_counts
         write_json(meta_path, meta)
     return 0
 
