@@ -34,7 +34,8 @@
   "unity_assets": {
     "Texture2D": 13832,
     "Sprite": 15208,
-    "AudioClip": 0,
-    "failed": 24
+    "AudioClip": 18963,
+    "failed": 24,
+    "AudioClipMissing": 14
   }
 }
