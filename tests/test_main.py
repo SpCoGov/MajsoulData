@@ -1,3 +1,4 @@
+import json
 import unittest
 from tempfile import TemporaryDirectory
 from pathlib import Path
@@ -9,6 +10,7 @@ from src.pipeline import (
     LUA_XOR_KEY,
     audio_sample_extension,
     asset_name_for_path,
+    collect_web_audio_paths,
     decode_lua_asset,
     export_unity_objects,
     merge_localized_fields,
@@ -99,6 +101,37 @@ class MainTests(unittest.TestCase):
             self.assertEqual(
                 (root / "AudioClip" / "0003" / "7_voice.ogg").read_bytes(),
                 b"OggSdata",
+            )
+
+    def test_collect_web_audio_paths_uses_generated_tables(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def write_table(relative_path, rows):
+                path = root / "tables" / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(rows), encoding="utf-8")
+
+            write_table("audio/audio.json", [{"path": "ui/click"}])
+            write_table("audio/bgm.json", [{"path": "music/lobby.mp3"}])
+            write_table(
+                "item_definition/character.json",
+                [{"sound": 1, "sound_folder": "yiji"}],
+            )
+            write_table("voice/sound.json", [{"id": 1, "path": "act_rich"}])
+            write_table(
+                "voice/event.json",
+                [{"path": "audio/sound/event/greeting"}],
+            )
+
+            self.assertEqual(
+                collect_web_audio_paths(root),
+                [
+                    "audio/music/lobby.mp3",
+                    "audio/sound/event/greeting.mp3",
+                    "audio/sound/yiji/act_rich.mp3",
+                    "ui/click.mp3",
+                ],
             )
 
     def test_group_assets_by_bundle_filters_prefixes(self):
