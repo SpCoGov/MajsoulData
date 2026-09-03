@@ -23,11 +23,20 @@ class RepositoryConfigTests(unittest.TestCase):
         self.assertIn("python -m compileall -q main.py src tests", workflow)
         self.assertIn("json ok", workflow)
         self.assertIn("protoc --proto_path=data/protocol/proto", workflow)
+        self.assertIn("python main.py --asset-mode all", workflow)
+        self.assertIn('Path("assets/manifest.json")', workflow)
+        self.assertIn("git add -A data/ raw/ assets/", workflow)
+        self.assertIn("git lfs install --local", workflow)
 
     def test_gitattributes_hides_raw_diff_and_marks_generated_outputs(self):
         attributes = Path(".gitattributes").read_text(encoding="utf-8")
 
         self.assertRegex(attributes, re.compile(r"^raw/\*\*.*linguist-generated=true.*-diff", re.M))
+        for extension in ("png", "wav", "ogg", "m4a"):
+            self.assertRegex(
+                attributes,
+                re.compile(rf"^assets/\*\*/\*\.{extension}.*filter=lfs", re.M),
+            )
         self.assertRegex(
             attributes,
             re.compile(r"^data/protocol/protocol\.md.*linguist-generated=true", re.M),

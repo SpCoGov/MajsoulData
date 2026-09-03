@@ -1,11 +1,16 @@
 import unittest
+from tempfile import TemporaryDirectory
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from src.pipeline import (
     DmapRange,
     LUA_XOR_KEY,
+    audio_sample_extension,
     asset_name_for_path,
     decode_lua_asset,
+    export_unity_objects,
     merge_localized_fields,
     is_current_client_metadata,
     parse_lua_literal,
@@ -16,8 +21,10 @@ from src.pipeline import (
     output_asset_path,
     raw_client_asset_path,
     raw_lua_asset_path,
+    safe_file_component,
     safe_output_path,
     text_asset_name_candidates,
+    unity_asset_output_path,
 )
 
 
@@ -59,6 +66,40 @@ class MainTests(unittest.TestCase):
         root = Path("data").resolve()
         with self.assertRaises(ValueError):
             safe_output_path(root, "../outside.lua.bytes")
+
+    def test_unity_asset_output_path_is_safe_and_unique(self):
+        self.assertEqual(safe_file_component('icon:rank/"gold"'), "icon_rank__gold_")
+        self.assertEqual(
+            unity_asset_output_path(
+                Path("assets"), "Sprite", 12, -34, 'icon:rank/"gold"', ".png"
+            ),
+            Path("assets").resolve() / "Sprite" / "0012" / "-34_icon_rank__gold_.png",
+        )
+        self.assertEqual(audio_sample_extension("voice.ogg"), ".ogg")
+        self.assertEqual(audio_sample_extension("voice.fsb"), ".wav")
+
+    def test_export_unity_objects_preserves_audio_format(self):
+        clip = SimpleNamespace(m_Name="voice", samples={"voice.ogg": b"OggSdata"})
+        obj = SimpleNamespace(
+            type=SimpleNamespace(name="AudioClip"),
+            path_id=7,
+            read=lambda: clip,
+        )
+        with TemporaryDirectory() as directory, patch(
+            "src.pipeline.UnityPy.load",
+            return_value=SimpleNamespace(objects=[obj]),
+        ):
+            root = Path(directory)
+            counts = export_unity_objects(b"bundle", root, 3)
+
+            self.assertEqual(
+                counts,
+                {"Texture2D": 0, "Sprite": 0, "AudioClip": 1, "failed": 0},
+            )
+            self.assertEqual(
+                (root / "AudioClip" / "0003" / "7_voice.ogg").read_bytes(),
+                b"OggSdata",
+            )
 
     def test_group_assets_by_bundle_filters_prefixes(self):
         assets = [
@@ -137,6 +178,17 @@ class MainTests(unittest.TestCase):
 
         self.assertTrue(
             is_current_client_metadata(metadata, client_info, "ASTC", "hash-a")
+        )
+        metadata["asset_mode"] = "all"
+        self.assertTrue(
+            is_current_client_metadata(
+                metadata, client_info, "ASTC", "hash-a", asset_mode="all"
+            )
+        )
+        self.assertFalse(
+            is_current_client_metadata(
+                metadata, client_info, "ASTC", "hash-a", asset_mode="text"
+            )
         )
         self.assertFalse(
             is_current_client_metadata(metadata, client_info, "DXT", "hash-a")
