@@ -1,12 +1,6 @@
 # Raw Unity extracts are kept for audit/recovery, but they are often large
 # one-line files that obscure the readable generated data in GitHub diffs.
 raw/** linguist-generated=true -diff
-assets/** linguist-generated=true
-assets/**/*.png filter=lfs diff=lfs merge=lfs -text
-assets/**/*.wav filter=lfs diff=lfs merge=lfs -text
-assets/**/*.ogg filter=lfs diff=lfs merge=lfs -text
-assets/**/*.m4a filter=lfs diff=lfs merge=lfs -text
-
 # Large derived protocol reference files are reproducible from raw/proto inputs.
 data/protocol/protocol.md linguist-generated=true
 data/protocol/schema.json linguist-generated=true
