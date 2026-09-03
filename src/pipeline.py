@@ -8,6 +8,7 @@ import shutil
 import sys
 import warnings
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -1053,6 +1054,98 @@ def extract_unity_assets(
     return totals
 
 
+def collect_web_audio_paths(output_dir: Path) -> list[str]:
+    def rows(relative_path: str) -> list[dict]:
+        path = output_dir / TABLES_SUBDIR / relative_path
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+
+    paths: set[str] = set()
+
+    def add(path: Any, prefix: str = "") -> None:
+        if not isinstance(path, str) or not path:
+            return
+        logical_path = posixpath.join(prefix, path).lstrip("/")
+        if posixpath.splitext(logical_path)[1].lower() not in {
+            ".m4a",
+            ".mp3",
+            ".ogg",
+            ".wav",
+        }:
+            logical_path += ".mp3"
+        paths.add(logical_path)
+
+    for relative_path in (
+        "audio/audio.json",
+        "spot/audio_spot.json",
+        "voice/event.json",
+        "voice/spot.json",
+    ):
+        for row in rows(relative_path):
+            add(row.get("path"))
+
+    for row in rows("audio/bgm.json"):
+        add(row.get("path"), "audio")
+
+    sound_folders = {
+        row.get("sound"): row.get("sound_folder")
+        for row in rows("item_definition/character.json")
+        if row.get("sound") is not None and row.get("sound_folder")
+    }
+    for row in rows("voice/sound.json"):
+        folder = sound_folders.get(row.get("id"))
+        if folder:
+            add(row.get("path"), f"audio/sound/{folder}")
+
+    return sorted(paths)
+
+
+def extract_web_audio(
+    profile_base_url: str,
+    audio_paths: list[str],
+    asset_dir: Path,
+    timeout: int,
+) -> tuple[int, int]:
+    def download_chunk(chunk: list[str]) -> tuple[int, list[str]]:
+        session = make_session()
+        downloaded = 0
+        missing: list[str] = []
+        for audio_path in chunk:
+            try:
+                data = fetch_bytes(
+                    session,
+                    join_url(
+                        profile_base_url,
+                        posixpath.join("Assets/MyAssets", audio_path),
+                    ),
+                    timeout,
+                )
+                target = safe_output_path(
+                    asset_dir, posixpath.join("AudioClip", audio_path)
+                )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
+                downloaded += 1
+            except (OSError, requests.RequestException, ValueError):
+                missing.append(audio_path)
+        return downloaded, missing
+
+    if not audio_paths:
+        return 0, 0
+    worker_count = min(8, len(audio_paths))
+    chunks = [audio_paths[index::worker_count] for index in range(worker_count)]
+    downloaded = 0
+    missing: list[str] = []
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        for chunk_downloaded, chunk_missing in executor.map(download_chunk, chunks):
+            downloaded += chunk_downloaded
+            missing.extend(chunk_missing)
+    for audio_path in missing[:20]:
+        print(f"  Missing web audio: {audio_path}", file=sys.stderr)
+    if len(missing) > 20:
+        print(f"  ... and {len(missing) - 20} more missing audio files", file=sys.stderr)
+    return downloaded, len(missing)
+
+
 def write_asset(raw_dir: Path, asset_path: str, data: bytes) -> None:
     if asset_path.startswith("LuaByte/Lua/"):
         target = safe_output_path(raw_dir, raw_lua_asset_path(asset_path))
@@ -1246,20 +1339,6 @@ def run(args: argparse.Namespace) -> int:
             asset_dir.resolve(),
             args.timeout,
         )
-        write_json(
-            asset_dir.resolve() / "manifest.json",
-            {
-                "product_version": client_info.get("product_version"),
-                "bundle_profile": profile,
-                "bundle_hash": bundle_hash,
-                "bundles": len(bundle_infos),
-                **unity_asset_counts,
-            },
-        )
-        print(
-            "Exported Unity assets: "
-            + ", ".join(f"{key}={value}" for key, value in unity_asset_counts.items())
-        )
     json_counts = build_json_outputs(
         output_dir.resolve(),
         raw_dir.resolve(),
@@ -1274,6 +1353,31 @@ def run(args: argparse.Namespace) -> int:
             "asset_mode": args.asset_mode,
         },
     )
+    if args.asset_mode == "all":
+        audio_paths = collect_web_audio_paths(output_dir.resolve())
+        print(f"Web audio paths: {len(audio_paths)}")
+        downloaded, missing = extract_web_audio(
+            profile_base_url,
+            audio_paths,
+            asset_dir.resolve(),
+            args.timeout,
+        )
+        unity_asset_counts["AudioClip"] += downloaded
+        unity_asset_counts["AudioClipMissing"] = missing
+        write_json(
+            asset_dir.resolve() / "manifest.json",
+            {
+                "product_version": client_info.get("product_version"),
+                "bundle_profile": profile,
+                "bundle_hash": bundle_hash,
+                "bundles": len(bundle_infos),
+                **unity_asset_counts,
+            },
+        )
+        print(
+            "Exported Unity assets: "
+            + ", ".join(f"{key}={value}" for key, value in unity_asset_counts.items())
+        )
     print(
         "Generated JSON: "
         f"{json_counts['tables']} tables, "
