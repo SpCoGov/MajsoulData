@@ -6,6 +6,7 @@
   "bundle_profile": "ASTC",
   "bundle_hash": "83b2fb98f029d2ace75337215bba5241a7aacf29",
   "raw_dir": "raw",
+  "asset_mode": "all",
   "tables": 281,
   "rows": 70224,
   "locale_sources": 461,
@@ -29,5 +30,11 @@
     "deco_character_json": 37,
     "spine_info_csv": 34,
     "ui_atlas_json": 328
+  },
+  "unity_assets": {
+    "Texture2D": 13832,
+    "Sprite": 15208,
+    "AudioClip": 0,
+    "failed": 24
   }
 }
