@@ -25,7 +25,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Checkout asset repository
+        uses: actions/checkout@v4
         with:
+          repository: SpCoGov/MajsoulAssets
+          path: asset-repo
           token: ${{ secrets.ASSET_PUSH_TOKEN }}
 
       - name: Set up Python
@@ -51,9 +56,9 @@ jobs:
       - name: Update data
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.force }}" = "true" ]; then
-            python main.py --asset-mode all
+            python main.py --asset-mode all --asset-dir asset-repo/assets
           else
-            python main.py --asset-mode all --skip-if-current
+            python main.py --asset-mode all --asset-dir asset-repo/assets --skip-if-current
           fi
 
       - name: Validate generated data
@@ -71,7 +76,7 @@ jobs:
                   count += 1
           print(f"json ok: {count}")
 
-          assets = json.loads(Path("assets/manifest.json").read_text(encoding="utf-8"))
+          assets = json.loads(Path("asset-repo/assets/manifest.json").read_text(encoding="utf-8"))
           assert assets["Texture2D"] > 0
           assert assets["Sprite"] > 0
           assert "AudioClip" in assets
@@ -83,10 +88,9 @@ jobs:
       - name: Commit and push changes
         id: commit_changes
         run: |
-          git lfs install --local
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A data/ raw/ assets/
+          git add -A data/ raw/
           if git diff --staged --quiet; then
             echo "No changes to commit"
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -94,6 +98,20 @@ jobs:
             git commit -m "Update data"
             git push
             echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Commit and push assets
+        working-directory: asset-repo
+        run: |
+          git lfs install --local
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A assets/
+          if git diff --staged --quiet; then
+            echo "No asset changes to commit"
+          else
+            git commit -m "Update assets"
+            git push
           fi
 
       - name: Copy and rename majsoul_protocol.desc
